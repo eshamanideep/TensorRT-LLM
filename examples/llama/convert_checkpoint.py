@@ -82,7 +82,7 @@ def parse_arguments():
         type=str,
         nargs='?',
         default='int8',
-        choices=['int8', 'int4', 'int4_gptq'],
+        choices=['int8', 'int4', 'int4_gptq', 'fp8'],
         help=
         'Define the precision for the weights when using weight-only quantization.'
         'You must also use --use_weight_only for that argument to have an impact.'
@@ -796,6 +796,7 @@ def convert_hf_llama(hf_model,
                      per_channel=False,
                      per_token=False,
                      int8_kv_cache=False,
+                     fp8_kv_cache = False,
                      act_range=[],
                      qkv_para=[],
                      smoother=[],
@@ -902,6 +903,25 @@ def convert_hf_llama(hf_model,
             kv_cache_weights[
                 tllm_prex +
                 'attention.kv_cache_scaling_factor'] = int8_kv_scales.reshape(
+                    [1])
+
+            weights.update(kv_cache_weights)
+        elif fp8_kv_cache: 
+            #more work needs to be done here most likely 
+            qkv_y = torch.cat([
+                act_range.get(prefix + 'self_attn.q_proj')["y"],
+                act_range.get(prefix + 'self_attn.k_proj')["y"],
+                act_range.get(prefix + 'self_attn.v_proj')["y"]
+            ],
+                              dim=0)
+
+            fp8_kv_scales = qkv_y.max() / 127.
+
+            kv_cache_weights = {}
+
+            kv_cache_weights[
+                tllm_prex +
+                'attention.kv_cache_scaling_factor'] = fp8_kv_scales.reshape(
                     [1])
 
             weights.update(kv_cache_weights)
@@ -1386,6 +1406,9 @@ def main():
     if args.int8_kv_cache:
         config['quantization']['kv_cache_quant_algo'] = 'INT8'
 
+    if args.fp8_kv_cache: 
+        config['quantization']['kv_cache_quant_algo'] = 'FP8'
+
     if args.weight_only_precision == 'int4_gptq':
         config['quantization'].update({
             "group_size": args.group_size,
@@ -1404,6 +1427,8 @@ def main():
         plugin_weight_only_quant_type = torch.int8
     elif args.weight_only_precision == 'int4':
         plugin_weight_only_quant_type = torch.quint4x2
+    elif args.weight_only_precision == 'fp8':
+        plugin_weight_only_quant_type = torch.float8_e4m3fn
 
     act_range = {}
     llama_qkv_para = {}
@@ -1424,7 +1449,7 @@ def main():
                 trust_remote_code=True,
             )
 
-        if args.smoothquant is not None or args.int8_kv_cache:
+        if args.smoothquant is not None or args.int8_kv_cache or args.fp8_kv_cache:
             os.environ["TOKENIZERS_PARALLELISM"] = os.environ.get(
                 "TOKENIZERS_PARALLELISM", "false")
             if args.load_model_on_cpu:
@@ -1493,6 +1518,7 @@ def main():
                     per_channel=args.per_channel,
                     per_token=args.per_token,
                     int8_kv_cache=args.int8_kv_cache,
+                    fp8_kv_cache = args.fp8_kv_cache,
                     act_range=convert_args['act_range'],
                     qkv_para=convert_args['llama_qkv_para'],
                     smoother=convert_args['llama_smoother'],
